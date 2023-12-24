@@ -1,0 +1,6 @@
+*.vim
+a.out
+vgcore*
+notes
+tags
+tile
