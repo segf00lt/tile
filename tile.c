@@ -5,8 +5,11 @@
 #define STB_SPRINTF_IMPLEMENTATION
 #include "stb_sprintf.h"
 
-const float ENTITY_MOVE_FORCE = 7e5;
-const float FRICTION = 18.20;
+const float ENTITY_MOVE_FORCE = 1.8e5;
+const float ENTITY_JUMP_FORCE = 9e6;
+const float DRAG = 4.20;
+const float FRICTION = 8.20;
+const float G = 9800.0f;
 
 const float TILE_SIZE = 32.0;
 const float HALF_TILE_SIZE = TILE_SIZE * 0.5;
@@ -62,6 +65,7 @@ struct Entity {
 	Vector2 accel;
 	Vector2 vel;
 	Vector2 pos;
+	Vector2 normal;
 	float mass;
 	float invmass; // 1/mass
 	float widthH; // half width
@@ -112,20 +116,16 @@ INLINE void canonicalize(Vector2 p, u64 *x, u64 *y) {
 INLINE void entityGetInput(Entity *ent) {
 	ent->force = (Vector2){ 0, 0 };
 
-	if(IsKeyDown(KEY_UP)) {
-		ent->force.y = -ENTITY_MOVE_FORCE;
+	if(IsKeyPressed(KEY_UP)) {
+		ent->force.y = ent->normal.y * ENTITY_JUMP_FORCE;
 	}
 
 	if(IsKeyDown(KEY_LEFT)) {
-		ent->force.x = -ENTITY_MOVE_FORCE;
+		ent->force.x += -ENTITY_MOVE_FORCE;
 	}
 
 	if(IsKeyDown(KEY_RIGHT)) {
-		ent->force.x = ENTITY_MOVE_FORCE;
-	}
-
-	if(IsKeyDown(KEY_DOWN)) {
-		ent->force.y = ENTITY_MOVE_FORCE;
+		ent->force.x += ENTITY_MOVE_FORCE;
 	}
 }
 
@@ -143,17 +143,24 @@ INLINE bool rayAABBIntersect(Vector2 a, Vector2 invdir, Vector2 min, Vector2 max
 	return tmax > fmaxf(tmin, 0.0);
 }
 
-INLINE void entitySimulate(Entity *ent, float timestep) {
+INLINE void entityDynamics(Entity *ent, float timestep, Vector2 *offset, Vector2 *newpos) {
 	/*
 	 * a = f/m
 	 * v = a*t + v0
 	 * s = 0.5*a*t^2 + v*t + s0
 	 */
 
+	ent->force.y += G * ent->mass;
 	ent->accel = Vector2Scale(ent->force, ent->invmass * timestep);
-	ent->vel = Vector2Subtract(Vector2Add(ent->vel, ent->accel), Vector2Scale(ent->vel, timestep*FRICTION));
-	Vector2 offset = Vector2Add(Vector2Scale(ent->vel,timestep),Vector2Scale(ent->accel,HALF(timestep)));
-	Vector2 newpos = Vector2Add(ent->pos, offset);
+	ent->vel = Vector2Subtract(Vector2Add(ent->vel, ent->accel), Vector2Scale(ent->vel, timestep*DRAG));
+	*offset = Vector2Add(Vector2Scale(ent->vel,timestep),Vector2Scale(ent->accel,HALF(timestep)));
+	*newpos = Vector2Add(ent->pos, *offset);
+}
+
+INLINE void entitySimulate(Entity *ent, float timestep) {
+	Vector2 offset, newpos;
+
+	entityDynamics(ent, timestep, &offset, &newpos);
 
 	u64 canonx1, canony1;
 	u64 canonx2, canony2;
@@ -201,11 +208,12 @@ INLINE void entitySimulate(Entity *ent, float timestep) {
 
 	int pencount = 2;
 	Vector2 a = ent->pos;
-	//float t = Vector2Length(offset);
-	float t = timestep;
+	float t = Vector2Length(offset);
+	//float t = timestep; // TODO why does this work?
 	float invt = 1/t;
 	Vector2 dir = { offset.x*invt, offset.y*invt };
 	Vector2 invdir = { t/offset.x, t/offset.y };
+	ent->normal = (Vector2){0,0};
 	for(int i = 0; i < n; ++i) {
 		float tx0 = (float)(tiles[0][i]*TILE_SIZE) - ent->widthH;
 		float ty0 = (float)(tiles[1][i]*TILE_SIZE) - ent->heightH;
@@ -217,18 +225,21 @@ INLINE void entitySimulate(Entity *ent, float timestep) {
 		Vector2 min = { tx0, ty0 }, max = { tx1, ty1 };
 
 		float toi = 0;
-		bool collision = rayAABBIntersect(ent->pos, invdir, min, max, &toi);
+		bool intersect = rayAABBIntersect(ent->pos, invdir, min, max, &toi);
 
-		if(collision && toi <= t) {
+		if(intersect && toi <= t) {
 			Vector2 point = Vector2Add(ent->pos, Vector2Scale(dir, toi));
 			Vector2 c = { tx0 + ent->widthH + HALF_TILE_SIZE, ty0 + ent->heightH + HALF_TILE_SIZE };
 			Vector2 normal = Vector2Subtract(point, c);
-			if(fabsf(normal.x) < fabsf(normal.y)) {
+			if(fabsf(normal.x) < fabsf(normal.y)) { // horizontal surface
+				ent->vel.x -= FRICTION*timestep*ent->vel.x;
+				*(u32*)&ent->normal.y = (*(u32*)(&normal.y) & NEGATIVE_ZERO) | 0x3f800000;
 				newpos.y = point.y;
 				float dy = newpos.y - a.y;
 				dir.y = dy*invt;
 				invdir.y = t/dy;
-			} else {
+			} else { // vertical surface
+				ent->vel.y -= FRICTION*timestep*ent->vel.y;
 				newpos.x = point.x;
 				float dx = newpos.x - a.x;
 				dir.x = dx*invt;
@@ -276,9 +287,10 @@ int main(void) {
 
 	Entity bob = {
 		.pos = { 200, 200 },
+		.mass = 27.0,
 		.invmass = 1.0/27.0,
-		.widthH = HALF(TILE_SIZE),
-		.heightH = HALF(TILE_SIZE),
+		.widthH = HALF(40),
+		.heightH = HALF(40),
 	};
 
 	for(; !WindowShouldClose(); EndDrawing()) {
@@ -296,8 +308,6 @@ int main(void) {
 
 		/* draw */
 		entityDraw(&bob);
-
-		DrawLineEx(bob.pos, Vector2Add(bob.pos, bob.accel), 2.0, YELLOW);
 
 		// draw tiles
 		Rectangle tile = { 0, 0, TILE_SIZE, TILE_SIZE };
